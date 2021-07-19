@@ -1,4 +1,5 @@
-# ![nf-core/transcriptcorral](docs/images/nf-core-transcriptcorral_logo.png)
+# ![nf-core/TranscriptCorral](docs/images/nf-core-transcriptcorral_logo.png)
+![lasso_image](docs/images/transcript_lasso.png)
 
 **This pipeline performs de novo transcriptome assembly using RNAseq data**.
 

@@ -16,7 +16,7 @@ The pipeline is built using [Nextflow](https://www.nextflow.io), a workflow tool
 
 ## Schematic
 
-![Schematic](assets/Transcript_corral.png)
+![Schematic](assets/transcriptome_assembly_pipeline.png)
 
 ## Quick Start
 

@@ -16,7 +16,7 @@ The pipeline is built using [Nextflow](https://www.nextflow.io), a workflow tool
 
 ## Schematic
 
-![Schematic](https://drive.google.com/file/d/1w3yiJX-zjOU4G5MQxjPN2OUiG5jjCwk8/view?usp=sharing)
+![Schematic](assets/Transcript_corral.png)
 
 ## Quick Start
 

@@ -6,10 +6,14 @@ channels:
   - bioconda
   - defaults
 dependencies:
-  - conda-forge::python=3.7.3
-  - conda-forge::markdown=3.1.1
-  - conda-forge::pymdown-extensions=6.0
-  - conda-forge::pygments=2.5.2
-  # TODO nf-core: Add required software dependencies here
-  - bioconda::fastqc=0.11.8
-  - bioconda::multiqc=1.7
+  - conda-forge::python=3.9.2
+  - conda-forge::markdown=3.3.4
+  - conda-forge::pymdown-extensions=8.1.1
+  - conda-forge::pygments=2.8.1
+  
+  # Software dependencies
+  - conda-forge::pandas=1.2.3
+  - conda-forge::numpy=1.20.2
+  - conda-forge::xmltodict=0.12.0
+  - conda-forge::tbb=2020.2
+  - bioconda::sra-tools=2.10.0

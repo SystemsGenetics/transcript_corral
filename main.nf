@@ -20,7 +20,23 @@ def helpMessage() {
 
     nextflow run nf-core/transcriptcorral --reads '*_R{1,2}.fastq.gz' -profile docker
 
-    Mandatory arguments:
+    Input arguments:
+      -- input                      A folder that contains local sequencing files
+      --skip_samples                A .txt file that contains a list of samples that should be skipped
+      --sras                        A .txt file containing a list of SRA IDs that should be retrieved from NCBI
+      --keep_sra                    A boolean that indicates whether sequencing files should be kept
+      --keep_retrieved_fastq
+
+    Job request arguments:
+      --max_cpus                    The number of cpus available
+      --max_memory                  The amount of memory available
+      --max_time                    The upper limit to allow the pipeline to run (format: ##.h)
+
+    Output arguments:
+      --outdir                      The folder to save results to
+      --publish_dir_mode            The type of link to use for publishing results (defaut: 'link')
+
+    #### TODO REMOVE EXAMPLE PARAMS ####
       --reads [file]                Path to input data (must be surrounded with quotes)
       -profile [str]                Configuration profile to use. Can use multiple (comma separated)
                                     Available: conda, docker, singularity, test, awsbatch, <institute> and more
@@ -52,26 +68,214 @@ if (params.help) {
     exit 0
 }
 
-/*
- * SET UP CONFIGURATION VARIABLES
+////////////////////////////////////////////////////
+/* --     Collect configuration parameters     -- */
+////////////////////////////////////////////////////
+
+println """\
+Workflow Information:
+---------------------
+  Project Directory:          ${workflow.projectDir}
+  Work Directory:             ${workflow.workDir}
+  Launch Directory:           ${workflow.launchDir}
+  Config Files:               ${workflow.configFiles}
+  Container Engine:           ${workflow.containerEngine}
+  Profile(s):                 ${workflow.profile}
+Samples:
+--------
+  Remote sample list path:    ${params.sras}
+  Local sample glob:          ${params.input}
+  Skip samples file:          ${params.skip_samples}
+Reports
+-------
+  Report directory:           ${params.outdir}/reports"""
+
+
+/**
+ * Create the directories we'll use for running batches
+ */
+file("${workflow.workDir}/transcript_files").mkdir()
+file("${workflow.workDir}/sample_files").mkdir()
+
+
+
+/**
+ * Check that other input files/directories exist
  */
 
-// Check if genome exists in the config file
-if (params.genomes && params.genome && !params.genomes.containsKey(params.genome)) {
-    exit 1, "The provided genome '${params.genome}' is not available in the iGenomes file. Currently the available genomes are ${params.genomes.keySet().join(", ")}"
+if (params.sras) {
+    sample_file = file("${params.sras}")
+    if (!sample_file.exists()) {
+        error "Error: The NCBI download sample file does not exists at '${params.sras}'. This file must be provided. If you are not downloading samples from NCBI SRA the file must exist but can be left empty."
+    }
 }
 
-// TODO nf-core: Add any reference files that are needed
-// Configurable reference genomes
-//
-// NOTE - THIS IS NOT USED IN THIS PIPELINE, EXAMPLE ONLY
-// If you want to use the channel below in a process, define the following:
-//   input:
-//   file fasta from ch_fasta
-//
-params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
-if (params.fasta) { ch_fasta = file(params.fasta, checkIfExists: true) }
+if (params.skip_samples) {
+    skip_file = file("${params.skip_samples}")
+    if (!skip_file.exists()) {
+       error "Error: The file containing samples to skip does not exists at '${params.skip_samples}'."
+   }
+}
 
+/**
+ * Create value channels that can be reused
+ */
+
+FAILED_RUN_TEMPLATE = Channel.fromPath("${params.failed_run_report_template}").collect()
+
+if (params.skip_samples) {
+  SKIP_SAMPLES_FILE = Channel.fromPath("${params.skip_samples}")
+}
+else {
+    Channel.value('NA').set { SKIP_SAMPLES_FILE }
+}
+
+/**
+ * Local Sample Input.
+ * This checks the folder that the user has given
+ */
+if (!params.input) {
+  Channel.empty().set { LOCAL_SAMPLE_FILES_FOR_STAGING }
+  Channel.empty().set { LOCAL_SAMPLE_FILES_FOR_JOIN }
+}
+else {
+  Channel.fromFilePairs( "${params.input}", size: -1 )
+    .set { LOCAL_SAMPLE_FILES_FOR_STAGING }
+  Channel.fromFilePairs( "${params.input}", size: -1 )
+    .set { LOCAL_SAMPLE_FILES_FOR_JOIN }
+}
+
+/**
+ * Remote fastq_run_id Input.
+ */
+if (params.sras == "") {
+  Channel.empty().set { SRR_FILE }
+}
+else {
+  Channel.fromPath("${params.sras}").set { SRR_FILE }
+}
+
+println """\
+Published Results:
+---------------
+  Output Dir:                 ${params.outdir}/transcript_files """
+
+
+
+
+/**
+ * Set the pattern for publishing downloaded FASTQ files
+ */
+publish_pattern_fastq_dump = params.keep_retrieved_fastq
+  ? "{*.fastq}"
+  : "{none}"
+
+
+
+/**
+ * Set the pattern for publishing trimmed FASTQ files
+ */
+publish_pattern_trimmomatic = params.trimmomatic_keep_trimmed_fastq
+  ? "{*.trim.log,*_trim.fastq}"
+  : "{*.trim.log}"
+
+
+
+/**
+ * Retrieves metadata for all of the remote samples
+ * and maps SRA runs to SRA experiments.
+ */
+process retrieve_sra_metadata {
+  publishDir params.outdir, mode: params.publish_dir_mode, pattern: "failed_runs.metadata.txt"
+  label "retrieve_sra_metadata"
+
+  input:
+    file srr_file from SRR_FILE
+    file skip_samples from SKIP_SAMPLES_FILE
+
+  output:
+    stdout REMOTE_SAMPLES_LIST
+    file "failed_runs.metadata.txt" into METADATA_FAILED_RUNS
+
+  script:
+  if (skip_samples != 'NA') {
+      skip_arg = "--skip_file ${skip_samples}"
+  }
+  """
+  >&2 echo "#TRACE n_remote_run_ids=`cat ${srr_file} | wc -l`"
+  retrieve_sra_metadata.py \
+      --run_id_file ${srr_file} \
+      --meta_dir ${workflow.workDir}/transcript_files \
+      ${skip_arg}
+  """
+}
+
+
+
+/**
+ * Splits the SRR2XRX mapping file
+ */
+
+// First create a list of the remote and local samples
+REMOTE_SAMPLES_LIST
+  .splitCsv()
+  .groupTuple(by: 1)
+  .map { [it[1], it[0].toString().replaceAll(/[\[\]\'\,]/,''), 'remote'] }
+  .set{REMOTE_SAMPLES_FOR_STAGING}
+
+LOCAL_SAMPLE_FILES_FOR_STAGING
+  .map{ [it[0], it[1], 'local'] }
+  .set{LOCAL_SAMPLES_FOR_STAGING}
+
+ALL_SAMPLES = REMOTE_SAMPLES_FOR_STAGING
+  .mix(LOCAL_SAMPLES_FOR_STAGING)
+
+
+
+/**
+ * Writes the batch files and stores them in the
+ * stage directory.
+ */
+process write_sample_files {
+  tag { sample_id }
+  label "local"
+
+  input:
+    set val(sample_id), val(run_files_or_ids), val(sample_type) from ALL_SAMPLES
+
+  output:
+    val (1) into SAMPLES_READY_SIGNAL
+
+  exec:
+    // Get any samples to skip
+    skip_samples = []
+    if (params.skip_samples) {
+        skip_file = file("${params.skip_samples}")
+        skip_file.eachLine { line ->
+            skip_samples << line.trim()
+        }
+    }
+
+    // Only stage files that should not be skipped.
+    if (skip_samples.intersect([sample_id]) == []) {
+      // Create a file for each samples.
+      sample_file = file("${workflow.workDir}/sample_files/" + sample_id + '.sample.csv')
+      sample_file.withWriter {
+        // If this is a local file.
+        if (sample_type.equals('local')) {
+          it.writeLine '"' + sample_id + '","' + run_files_or_ids.join('::') + '","' + sample_type + '"'
+        }
+        // If this is a remote file.
+        else {
+          it.writeLine '"' + sample_id + '","' + run_files_or_ids + '","' + sample_type + '"'
+        }
+      }
+    }
+}
+
+
+
+// ######  NF-CORE CODE  ######
 // Has the run name been specified by the user?
 //  this has the bonus effect of catching both -name and --name
 custom_runName = params.name
@@ -93,63 +297,6 @@ if (workflow.profile.contains('awsbatch')) {
 ch_multiqc_config = file("$baseDir/assets/multiqc_config.yaml", checkIfExists: true)
 ch_multiqc_custom_config = params.multiqc_config ? Channel.fromPath(params.multiqc_config, checkIfExists: true) : Channel.empty()
 ch_output_docs = file("$baseDir/docs/output.md", checkIfExists: true)
-
-/*
- * Create a channel for input read files
- */
-if (params.readPaths) {
-    if (params.single_end) {
-        Channel
-            .from(params.readPaths)
-            .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true) ] ] }
-            .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_trimming }
-    } else {
-        Channel
-            .from(params.readPaths)
-            .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true), file(row[1][1], checkIfExists: true) ] ] }
-            .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_trimming }
-    }
-} else {
-    Channel
-        .fromFilePairs(params.reads, size: params.single_end ? 1 : 2)
-        .ifEmpty { exit 1, "Cannot find any reads matching: ${params.reads}\nNB: Path needs to be enclosed in quotes!\nIf this is single-end data, please specify --single_end on the command line." }
-        .into { ch_read_files_fastqc; ch_read_files_trimming }
-}
-
-// Header log info
-log.info nfcoreHeader()
-def summary = [:]
-if (workflow.revision) summary['Pipeline Release'] = workflow.revision
-summary['Run Name']         = custom_runName ?: workflow.runName
-// TODO nf-core: Report custom parameters here
-summary['Reads']            = params.reads
-summary['Fasta Ref']        = params.fasta
-summary['Data Type']        = params.single_end ? 'Single-End' : 'Paired-End'
-summary['Max Resources']    = "$params.max_memory memory, $params.max_cpus cpus, $params.max_time time per job"
-if (workflow.containerEngine) summary['Container'] = "$workflow.containerEngine - $workflow.container"
-summary['Output dir']       = params.outdir
-summary['Launch dir']       = workflow.launchDir
-summary['Working dir']      = workflow.workDir
-summary['Script dir']       = workflow.projectDir
-summary['User']             = workflow.userName
-if (workflow.profile.contains('awsbatch')) {
-    summary['AWS Region']   = params.awsregion
-    summary['AWS Queue']    = params.awsqueue
-    summary['AWS CLI']      = params.awscli
-}
-summary['Config Profile'] = workflow.profile
-if (params.config_profile_description) summary['Config Description'] = params.config_profile_description
-if (params.config_profile_contact)     summary['Config Contact']     = params.config_profile_contact
-if (params.config_profile_url)         summary['Config URL']         = params.config_profile_url
-if (params.email || params.email_on_fail) {
-    summary['E-mail Address']    = params.email
-    summary['E-mail on failure'] = params.email_on_fail
-    summary['MultiQC maxsize']   = params.max_multiqc_email_size
-}
-log.info summary.collect { k,v -> "${k.padRight(18)}: $v" }.join("\n")
-log.info "-\033[2m--------------------------------------------------\033[0m-"
 
 // Check the hostnames against configured profiles
 checkHostname()
@@ -191,80 +338,153 @@ process get_software_versions {
     echo $workflow.nextflow.version > v_nextflow.txt
     fastqc --version > v_fastqc.txt
     multiqc --version > v_multiqc.txt
+    samtools version > v_samtools.txt
+    fastq-dump --version > v_fastq_dump.txt
+    trimmomatic -version > v_trimmomatic.txt
     scrape_software_versions.py &> software_versions_mqc.yaml
     """
 }
 
-/*
- * STEP 1 - FastQC
+// ###### PIPELINE CODE  ######
+
+// Create the channel that will watch the process directory
+// for new files. When a new sample file is added
+// it will be read it and sent it through the workflow.
+NEXT_SAMPLE = Channel
+   .watchPath("${workflow.workDir}/sample_files")
+
+/**
+ * Opens the sample file and prints it's contents to
+ * STDOUT so that the samples can be caught in a new
+ * channel and start processing.
  */
-process fastqc {
-    tag "$name"
-    label 'process_medium'
-    publishDir "${params.outdir}/fastqc", mode: 'copy',
-        saveAs: { filename ->
-                      filename.indexOf(".zip") > 0 ? "zips/$filename" : "$filename"
-                }
+process read_sample_file {
+  tag { sample_file }
+  label "local"
+  cache false
 
-    input:
-    set val(name), file(reads) from ch_read_files_fastqc
+  input:
+    file(sample_file) from NEXT_SAMPLE
 
-    output:
-    file "*_fastqc.{zip,html}" into ch_fastqc_results
+  output:
+    stdout SAMPLE_FILE_CONTENTS
 
-    script:
-    """
-    fastqc --quiet --threads $task.cpus $reads
-    """
+  script:
+  """
+  cat ${sample_file}
+  """
 }
 
-/*
- * STEP 2 - MultiQC
+// Split our sample file contents into two different
+// channels, one for remote samples and another for local.
+LOCAL_SAMPLES = Channel.create()
+REMOTE_SAMPLES = Channel.create()
+SAMPLE_FILE_CONTENTS
+  .splitCsv(quote: '"')
+  .choice(LOCAL_SAMPLES, REMOTE_SAMPLES) { a -> a[2] =~ /local/ ? 0 : 1 }
+
+
+
+/**
+ * Downloads SRA files from NCBI using the SRA Toolkit.
  */
-process multiqc {
-    publishDir "${params.outdir}/MultiQC", mode: 'copy'
+process download_runs {
+  publishDir params.outdir, mode: params.publish_dir_mode, pattern: '*.failed_runs.download.txt', saveAs: { "Samples/${sample_id}/${it}" }
 
-    input:
-    file (multiqc_config) from ch_multiqc_config
-    file (mqc_custom_config) from ch_multiqc_custom_config.collect().ifEmpty([])
-    // TODO nf-core: Add in log files from your new processes for MultiQC to find!
-    file ('fastqc/*') from ch_fastqc_results.collect().ifEmpty([])
-    file ('software_versions/*') from ch_software_versions_yaml.collect()
-    file workflow_summary from ch_workflow_summary.collectFile(name: "workflow_summary_mqc.yaml")
+  tag { sample_id }
+  label "download_runs"
 
-    output:
-    file "*multiqc_report.html" into ch_multiqc_report
-    file "*_data"
-    file "multiqc_plots"
+  input:
+    set val(sample_id), val(run_ids), val(type) from REMOTE_SAMPLES
 
-    script:
-    rtitle = custom_runName ? "--title \"$custom_runName\"" : ''
-    rfilename = custom_runName ? "--filename " + custom_runName.replaceAll('\\W','_').replaceAll('_+','_') + "_multiqc_report" : ''
-    custom_config_file = params.multiqc_config ? "--config $mqc_custom_config" : ''
-    // TODO nf-core: Specify which MultiQC modules to use with -m for a faster run time
-    """
-    multiqc -f $rtitle $rfilename $custom_config_file .
-    """
+  output:
+    set val(sample_id), file("*.sra") optional true into SRA_TO_EXTRACT    
+    set val(sample_id), file('*.failed_runs.download.txt') into DOWNLOAD_FAILED_RUNS
+
+  script:
+  """
+  echo "#TRACE n_remote_run_ids=${run_ids.tokenize(' ').size()}"
+  retrieve_sra.py --sample ${sample_id} --run_ids ${run_ids} --akey \$ASPERA_KEY
+  """
 }
 
-/*
- * STEP 3 - Output Description HTML
+/**
+ * Extracts FASTQ files from downloaded SRA files.
  */
-process output_documentation {
-    publishDir "${params.outdir}/pipeline_info", mode: 'copy'
+process fastq_dump {
+  publishDir params.outdir, mode: params.publish_dir_mode, pattern: publish_pattern_fastq_dump, saveAs: { "Samples/${sample_id}/${it}" }
+  publishDir params.outdir, mode: params.publish_dir_mode, pattern: '*.failed_runs.fastq-dump.txt', saveAs: { "Samples/${sample_id}/${it}" }
+  tag { sample_id }
+  label "fastq_dump"
 
-    input:
-    file output_docs from ch_output_docs
+  input:
+    set val(sample_id), file(sra_files) from SRA_TO_EXTRACT
 
-    output:
-    file "results_description.html"
+  output:
+    set val(sample_id), file("*.fastq") optional true into DOWNLOADED_FASTQ_FOR_MERGING     
+    set val(sample_id), file('*.failed_runs.fastq-dump.txt') into FASTQ_DUMP_FAILED_RUNS
 
-    script:
-    """
-    markdown_to_html.py $output_docs -o results_description.html
-    """
+  script:
+  """
+  echo "#TRACE sample_id=${sample_id}"
+  echo "#TRACE sra_bytes=`stat -Lc '%s' *.sra | awk '{sum += \$1} END {print sum}'`"
+  sra2fastq.py --sample ${sample_id} --sra_files ${sra_files}
+  """
 }
 
+
+
+/**
+ * This process merges the fastq files based on their sample_id number.
+ */
+process fastq_merge {
+  tag { sample_id }
+
+  input:
+    set val(sample_id), file(fastq_files) from DOWNLOADED_FASTQ_FOR_MERGING
+
+  output:
+    set val(sample_id), file("${sample_id}_?.fastq") into MERGED_SAMPLES
+
+  script:
+  """
+  echo "#TRACE sample_id=${sample_id}"
+  echo "#TRACE fastq_lines=`cat *.fastq | wc -l`"
+  fastq_merge.sh ${sample_id}
+  """
+}
+
+/**
+ * This is where we combine samples from both local and remote sources.
+ */
+COMBINED_SAMPLES = LOCAL_SAMPLES.mix(MERGED_SAMPLES)
+
+
+
+/**
+ * Creates a report of any SRA run IDs that failed and why they failed.
+ */
+process failed_run_report {
+  label "reports"
+  publishDir "${params.outdir}/reports", mode: params.publish_dir_mode
+
+  input:
+    file metadata_failed_runs from METADATA_FAILED_RUNS
+    file download_failed_runs from DOWNLOAD_FAILED_RUNS.collect()
+    file fastq_dump_failed_runs from FASTQ_DUMP_FAILED_RUNS.collect()
+    file failed_run_template from FAILED_RUN_TEMPLATE
+
+  output:
+    file "failed_SRA_run_report.html" into FAILED_RUN_REPORT
+
+  script:
+  """
+  failed_runs_report.py --template ${failed_run_template}
+  """
+
+}
+
+// ######  NF-CORE CODE ######
 /*
  * Completion e-mail notification
  */

@@ -10,6 +10,8 @@ dependencies:
   - conda-forge::markdown=3.3.4
   - conda-forge::pymdown-extensions=8.1.1
   - conda-forge::pygments=2.8.1
+  - conda-forge::requests
+  - conda-forge::jinja2
   
   # Software dependencies
   - conda-forge::pandas=1.2.3

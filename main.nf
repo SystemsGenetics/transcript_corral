@@ -5,7 +5,7 @@
 ========================================================================================
  nf-core/transcriptcorral Analysis Pipeline.
  #### Homepage / Documentation
- https://github.com/nf-core/transcriptcorral
+ https://github.com/systemsgenetics/transcriptcorral
 ----------------------------------------------------------------------------------------
 */
 
@@ -92,7 +92,7 @@ Reports
 
 
 /**
- * Create the directories we'll use for running batches
+ * Create the directories we'll use for fastq files
  */
 file("${workflow.workDir}/transcript_files").mkdir()
 file("${workflow.workDir}/sample_files").mkdir()
@@ -136,13 +136,10 @@ else {
  */
 if (!params.input) {
   Channel.empty().set { LOCAL_SAMPLE_FILES_FOR_STAGING }
-  Channel.empty().set { LOCAL_SAMPLE_FILES_FOR_JOIN }
 }
 else {
   Channel.fromFilePairs( "${params.input}", size: -1 )
     .set { LOCAL_SAMPLE_FILES_FOR_STAGING }
-  Channel.fromFilePairs( "${params.input}", size: -1 )
-    .set { LOCAL_SAMPLE_FILES_FOR_JOIN }
 }
 
 /**
@@ -161,25 +158,12 @@ Published Results:
   Output Dir:                 ${params.outdir}/transcript_files """
 
 
-
-
 /**
  * Set the pattern for publishing downloaded FASTQ files
  */
 publish_pattern_fastq_dump = params.keep_retrieved_fastq
   ? "{*.fastq}"
   : "{none}"
-
-
-
-/**
- * Set the pattern for publishing trimmed FASTQ files
- */
-publish_pattern_trimmomatic = params.trimmomatic_keep_trimmed_fastq
-  ? "{*.trim.log,*_trim.fastq}"
-  : "{*.trim.log}"
-
-
 
 /**
  * Retrieves metadata for all of the remote samples
@@ -211,7 +195,6 @@ process retrieve_sra_metadata {
 }
 
 
-
 /**
  * Splits the SRR2XRX mapping file
  */
@@ -231,7 +214,6 @@ ALL_SAMPLES = REMOTE_SAMPLES_FOR_STAGING
   .mix(LOCAL_SAMPLES_FOR_STAGING)
 
 
-
 /**
  * Writes the batch files and stores them in the
  * stage directory.
@@ -244,7 +226,7 @@ process write_sample_files {
     set val(sample_id), val(run_files_or_ids), val(sample_type) from ALL_SAMPLES
 
   output:
-    val (1) into SAMPLES_READY_SIGNAL
+    file '*.sample.csv' into SAMPLE_FILES
 
   exec:
     // Get any samples to skip
@@ -259,7 +241,7 @@ process write_sample_files {
     // Only stage files that should not be skipped.
     if (skip_samples.intersect([sample_id]) == []) {
       // Create a file for each samples.
-      sample_file = file("${workflow.workDir}/sample_files/" + sample_id + '.sample.csv')
+      sample_file = file("${task.workDir}" + '/' + sample_id + '.sample.csv')
       sample_file.withWriter {
         // If this is a local file.
         if (sample_type.equals('local')) {
@@ -276,47 +258,6 @@ process write_sample_files {
 
 
 // ######  NF-CORE CODE  ######
-// Has the run name been specified by the user?
-//  this has the bonus effect of catching both -name and --name
-custom_runName = params.name
-if (!(workflow.runName ==~ /[a-z]+_[a-z]+/)) {
-    custom_runName = workflow.runName
-}
-
-if (workflow.profile.contains('awsbatch')) {
-    // AWSBatch sanity checking
-    if (!params.awsqueue || !params.awsregion) exit 1, "Specify correct --awsqueue and --awsregion parameters on AWSBatch!"
-    // Check outdir paths to be S3 buckets if running on AWSBatch
-    // related: https://github.com/nextflow-io/nextflow/issues/813
-    if (!params.outdir.startsWith('s3:')) exit 1, "Outdir not on S3 - specify S3 Bucket to run on AWSBatch!"
-    // Prevent trace files to be stored on S3 since S3 does not support rolling files.
-    if (params.tracedir.startsWith('s3:')) exit 1, "Specify a local tracedir or run without trace! S3 cannot be used for tracefiles."
-}
-
-// Stage config files
-ch_multiqc_config = file("$baseDir/assets/multiqc_config.yaml", checkIfExists: true)
-ch_multiqc_custom_config = params.multiqc_config ? Channel.fromPath(params.multiqc_config, checkIfExists: true) : Channel.empty()
-ch_output_docs = file("$baseDir/docs/output.md", checkIfExists: true)
-
-// Check the hostnames against configured profiles
-checkHostname()
-
-Channel.from(summary.collect{ [it.key, it.value] })
-    .map { k,v -> "<dt>$k</dt><dd><samp>${v ?: '<span style=\"color:#999999;\">N/A</a>'}</samp></dd>" }
-    .reduce { a, b -> return [a, b].join("\n            ") }
-    .map { x -> """
-    id: 'nf-core-transcriptcorral-summary'
-    description: " - this information is collected when the pipeline is started."
-    section_name: 'nf-core/transcriptcorral Workflow Summary'
-    section_href: 'https://github.com/nf-core/transcriptcorral'
-    plot_type: 'html'
-    data: |
-        <dl class=\"dl-horizontal\">
-            $x
-        </dl>
-    """.stripIndent() }
-    .set { ch_workflow_summary }
-
 /*
  * Parse software version numbers
  */
@@ -336,11 +277,7 @@ process get_software_versions {
     """
     echo $workflow.manifest.version > v_pipeline.txt
     echo $workflow.nextflow.version > v_nextflow.txt
-    fastqc --version > v_fastqc.txt
-    multiqc --version > v_multiqc.txt
-    samtools version > v_samtools.txt
     fastq-dump --version > v_fastq_dump.txt
-    trimmomatic -version > v_trimmomatic.txt
     scrape_software_versions.py &> software_versions_mqc.yaml
     """
 }
@@ -350,8 +287,8 @@ process get_software_versions {
 // Create the channel that will watch the process directory
 // for new files. When a new sample file is added
 // it will be read it and sent it through the workflow.
-NEXT_SAMPLE = Channel
-   .watchPath("${workflow.workDir}/sample_files")
+//NEXT_SAMPLE = Channel
+//   .watchPath("${workflow.workDir}/sample_files")
 
 /**
  * Opens the sample file and prints it's contents to
@@ -364,7 +301,7 @@ process read_sample_file {
   cache false
 
   input:
-    file(sample_file) from NEXT_SAMPLE
+    file(sample_file) from SAMPLE_FILES
 
   output:
     stdout SAMPLE_FILE_CONTENTS

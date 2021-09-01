@@ -136,10 +136,13 @@ else {
  */
 if (!params.input) {
   Channel.empty().set { LOCAL_SAMPLE_FILES_FOR_STAGING }
+  Channel.empty().set { LOCAL_SAMPLE_FILES_FOR_JOIN }
 }
 else {
   Channel.fromFilePairs( "${params.input}", size: -1 )
     .set { LOCAL_SAMPLE_FILES_FOR_STAGING }
+  Channel.fromFilePairs( "${params.input}", size: -1 )
+    .set { LOCAL_SAMPLE_FILES_FOR_JOIN }
 }
 
 /**
@@ -290,6 +293,8 @@ process get_software_versions {
 //NEXT_SAMPLE = Channel
 //   .watchPath("${workflow.workDir}/sample_files")
 
+
+// ### FASTQ File Setup ###
 /**
  * Opens the sample file and prints it's contents to
  * STDOUT so that the samples can be caught in a new
@@ -320,7 +325,13 @@ SAMPLE_FILE_CONTENTS
   .splitCsv(quote: '"')
   .choice(LOCAL_SAMPLES, REMOTE_SAMPLES) { a -> a[2] =~ /local/ ? 0 : 1 }
 
-
+// Process local sample files for downstream analysis.
+LOCAL_SAMPLES
+  .map {[it[0], 'hi']}
+  .mix(LOCAL_SAMPLE_FILES_FOR_JOIN)
+  .groupTuple(size: 2)
+  .map {[it[0], it[1][0]]}
+  .set {LOCAL_SAMPLES_FOR_TRIMMING}
 
 /**
  * Downloads SRA files from NCBI using the SRA Toolkit.
@@ -381,7 +392,7 @@ process fastq_merge {
     set val(sample_id), file(fastq_files) from DOWNLOADED_FASTQ_FOR_MERGING
 
   output:
-    set val(sample_id), file("${sample_id}_?.fastq") into MERGED_SAMPLES
+    set val(sample_id), file("${sample_id}_?.fastq") into MERGED_SAMPLES_FOR_TRIMMING
 
   script:
   """
@@ -394,7 +405,7 @@ process fastq_merge {
 /**
  * This is where we combine samples from both local and remote sources.
  */
-COMBINED_SAMPLES = LOCAL_SAMPLES.mix(MERGED_SAMPLES)
+COMBINED_SAMPLES = LOCAL_SAMPLES_FOR_TRIMMING.mix(MERGED_SAMPLES_FOR_TRIMMING)
 
 
 
@@ -419,6 +430,58 @@ process failed_run_report {
   failed_runs_report.py --template ${failed_run_template}
   """
 
+}
+
+// ### FASTQ Preprocessing ###
+/*
+ * Trim adapters using Trim Galore
+ */
+process trim_adapters {
+   input:
+   set val(sample_id), path(raw_fastq_files) from COMBINED_SAMPLES
+
+   output:
+   tuple val(sample_id), file("*_val_1.fq"), file("*_val_2.fq") into TRIMMED_PAIRS
+
+   """
+   echo "Trimming adapters from $raw_fastq_files"
+
+   trim_galore --paired --trim-n --length 36 -q 5 --suppress_warn $raw_fastq_files
+   """
+}
+
+/*
+ * Perform error correction using RCorrector
+ */
+process error_correction {
+   input:
+   tuple val(sample_id), file(forward_reads), file(reverse_reads) from TRIMMED_PAIRS
+
+   output:
+   tuple val(sample_id), file("*_1.cor.fq"), file("*_2.cor.fq") into CORRECTED_PAIRS
+
+   """
+   echo "Error correction with files: $forward_reads $reverse_reads"
+
+   perl /rcorrector/run_rcorrector.pl -1 $forward_reads -2 $reverse_reads
+   """
+}
+
+/*
+ * Discard reads that RCorrector deemed unfixable
+ */
+process discard_unfixables {
+   input:
+   tuple val(sample_id), file(forward_reads), file(reverse_reads) from CORRECTED_PAIRS
+
+   output:
+   tuple val(sample_id), file("*_1.cor.fq"), file("*_2.cor.fq") into CORRECTED_PAIRS_CLEAN
+
+   """
+   echo "Removing unfixable reads from corrected files: $forward_reads $reverse_reads"
+
+   python ${workflow.launchDir}/bin/FilterUncorrectedReadsPEfastq.py -1 $forward_reads -2 $reverse_reads -s $sample_id
+   """
 }
 
 // ######  NF-CORE CODE ######

@@ -13,7 +13,7 @@ ENV PATH /opt/conda/envs/nf-core-transcriptcorral-1.0dev/bin:$PATH
 RUN conda env export --name nf-core-transcriptcorral-1.0dev > nf-core-transcriptcorral-1.0dev.yml
 
 # Installing make
-RUN apt-get --allow-releaseinfo-change -y update
+RUN apt-get --allow-releaseinfo-change --fix-missing -y update
 RUN apt-get install -y make
 RUN apt-get install -y g++
 RUN apt-get install zlib1g-dev
@@ -36,6 +36,17 @@ RUN git clone https://github.com/mourisl/rcorrector.git \
   && cd ..
 
 ENV PATH "$PATH:/rcorrector"
+
+
+# Get the non-redundant SILVA LSU databases and combine them
+RUN mkdir SILVA_db \
+  && cd SILVA_db \
+  && wget https://www.arb-silva.de/fileadmin/silva_databases/current/Exports/SILVA_138.1_LSURef_NR99_tax_silva.fasta.gz \
+  && wget https://www.arb-silva.de/fileadmin/silva_databases/current/Exports/SILVA_138.1_SSURef_NR99_tax_silva.fasta.gz \
+  && zcat *.fasta.gz > combined_silva.fasta \
+  && sed '/^[^>]/s/U/T/g' combined_silva.fasta > combined_silva_Tfixed.fasta \
+  && bowtie2-build combined_silva_Tfixed.fasta combined_silva_reference
+
 
 WORKDIR /
 
@@ -69,5 +80,5 @@ ENV ASPERA_KEY "/opt/aspera/connect/etc/asperaweb_id_dsa.openssh"
 
 WORKDIR /
 
-
-
+# Adding the Trinity Docker image
+FROM trinityrnaseq/trinityrnaseq:2.13.2

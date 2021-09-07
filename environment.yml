@@ -23,3 +23,6 @@ dependencies:
   # TrimGalore dependencies
   - bioconda::cutadapt=3.4
   - bioconda::fastqc=0.11.9
+
+  # Dependencies for SILVA rRNA removal
+  - bioconda::bowtie2

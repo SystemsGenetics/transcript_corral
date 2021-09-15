@@ -80,5 +80,21 @@ ENV ASPERA_KEY "/opt/aspera/connect/etc/asperaweb_id_dsa.openssh"
 
 WORKDIR /
 
-# Adding the Trinity Docker image
-FROM trinityrnaseq/trinityrnaseq:2.13.2
+# Installing Evidentialgenes and dependencies
+RUN apt-get --allow-releaseinfo-change --fix-missing -y update \
+  && apt-get install -y exonerate \
+  && apt-get install -y cd-hit \
+  && apt-get install -y ncbi-blast+ \
+  && wget http://arthropods.eugenes.org/EvidentialGene/other/evigene_old/evigene20may20.tar \
+  && tar -xvf evigene20may20.tar
+
+ENV PATH "$PATH:/evigene/scripts"
+ENV PATH "$PATH:/evigene/scripts/prot"
+ENV PATH "$PATH:/evigene/scripts/rnaseq"
+
+# Adding the BUSCO Docker image
+COPY --from=ezlabgva/busco:v5.2.2_cv1 / /
+
+# Adding the Trinity Docker image 
+COPY --from=trinityrnaseq/trinityrnaseq:2.13.2 / /
+

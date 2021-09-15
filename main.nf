@@ -21,12 +21,17 @@ def helpMessage() {
     nextflow run nf-core/transcriptcorral --reads '*_R{1,2}.fastq.gz' -profile docker
 
     Input arguments:
-      --input                      A folder that contains local sequencing files
+      --local_samples               A folder that contains local paired-end sequencing files that should be preprocessed
       --skip_samples                A .txt file that contains a list of samples that should be skipped
-      --sras                        A .txt file containing a list of SRA IDs that should be retrieved from NCBI
+      --sra_samples                 A .txt file containing a list of SRA IDs that should be retrieved from NCBI
       --keep_sra                    A boolean that indicates whether sequencing files should be kept
-      --keep_retrieved_fastq
-
+  
+     --preprocessed_samples         A filepattern that contains local paired-end sequencing files that should directly be used for assembly
+     --input_assemblies             A filepath containing any preassembled transcriptomes to be used for meta-assembly and BUSCO testing
+    
+    Assembler options:
+    --use_trinity                   A boolean that indicates whether to assemble with Trinity    
+    
     Job request arguments:
       --max_cpus                    The number of cpus available
       --max_memory                  The amount of memory available
@@ -64,9 +69,13 @@ Workflow Information:
   Profile(s):                 ${workflow.profile}
 Samples:
 --------
-  Remote sample list path:    ${params.sras}
-  Local sample glob:          ${params.input}
+  Remote sample list path:    ${params.sra_samples}
+  Local sample glob:          ${params.local_samples}
   Skip samples file:          ${params.skip_samples}
+
+  Preprocesed samples:        ${params.preprocessed_samples}
+  User provided assemblies:   ${params.input_assemblies}
+
 Reports
 -------
   Report directory:           ${params.outdir}/reports"""
@@ -84,10 +93,10 @@ file("${workflow.workDir}/sample_files").mkdir()
  * Check that other input files/directories exist
  */
 
-if (params.sras) {
-    sample_file = file("${params.sras}")
+if (params.sra_samples) {
+    sample_file = file("${params.sra_samples}")
     if (!sample_file.exists()) {
-        error "Error: The NCBI download sample file does not exists at '${params.sras}'. This file must be provided. If you are not downloading samples from NCBI SRA the file must exist but can be left empty."
+        error "Error: The NCBI download sample file does not exists at '${params.sra_samples}'. This file must be provided. If you are not downloading samples from NCBI SRA the file must exist but can be left empty."
     }
 }
 
@@ -115,25 +124,52 @@ else {
  * Local Sample Input.
  * This checks the folder that the user has given
  */
-if (!params.input) {
+if (!params.local_samples) {
   Channel.empty().set { LOCAL_SAMPLE_FILES_FOR_STAGING }
   Channel.empty().set { LOCAL_SAMPLE_FILES_FOR_JOIN }
 }
 else {
-  Channel.fromFilePairs( "${params.input}", size: -1 )
+  Channel.fromFilePairs( "${params.local_samples}", size: -1 )
     .set { LOCAL_SAMPLE_FILES_FOR_STAGING }
-  Channel.fromFilePairs( "${params.input}", size: -1 )
+  Channel.fromFilePairs( "${params.local_samples}", size: -1 )
     .set { LOCAL_SAMPLE_FILES_FOR_JOIN }
+}
+
+/* 
+ * Preprocessed Sample Input
+ */
+if (!params.preprocessed_samples) {
+  Channel.empty().set { PREPROCESSED_FORWARD_READS }
+  Channel.empty().set { PREPROCESSED_REVERSE_READS }
+} 
+else {
+  Channel.fromFilePairs( "${params.preprocessed_samples}", size: -1 )
+    .map { it[1][0] }
+    .set { PREPROCESSED_FORWARD_READS }
+
+  Channel.fromFilePairs( "${params.preprocessed_samples}", size: -1 )
+    .map { it[1][1] }
+    .set { PREPROCESSED_REVERSE_READS }
+}
+
+//FORWARD_READS_FOR_ASSEMBLY.view()
+//REVERSE_READS_FOR_ASSEMBLY.view()
+
+/* 
+ * User provided transcriptome assemblies
+ */
+if (params.input_assemblies) {
+  Channel.fromPath("${params.input_assemblies}").set { INPUT_ASSEMBLIES }
 }
 
 /**
  * Remote fastq_run_id Input.
  */
-if (params.sras == "") {
+if (params.sra_samples == "") {
   Channel.empty().set { SRR_FILE }
 }
 else {
-  Channel.fromPath("${params.sras}").set { SRR_FILE }
+  Channel.fromPath("${params.sra_samples}").set { SRR_FILE }
 }
 
 println """\
@@ -145,13 +181,13 @@ Published Results:
 /**
  * Set the pattern for publishing downloaded FASTQ files
  */
-publish_pattern_fastq_dump = params.keep_retrieved_fastq
+publish_pattern_fastq_dump = params.keep_sra
   ? "{*.fastq}"
   : "{none}"
 
 /**
  * Retrieves metadata for all of the remote samples
- * and maps SRA runs to SRA experiments.
+ * and maps SRA runs to SRA experiments.set
  */
 process retrieve_sra_metadata {
   publishDir params.outdir, mode: params.publish_dir_mode, pattern: "failed_runs.metadata.txt"
@@ -424,6 +460,7 @@ process trim_adapters {
    output:
    tuple val(sample_id), file("*_val_1.fq"), file("*_val_2.fq") into TRIMMED_PAIRS
 
+   script:
    """
    echo "Trimming adapters from $raw_fastq_files"
 
@@ -441,6 +478,7 @@ process error_correction {
    output:
    tuple val(sample_id), file("*_1.cor.fq"), file("*_2.cor.fq") into CORRECTED_PAIRS
 
+   script:
    """
    echo "Error correction with files: $forward_reads $reverse_reads"
 
@@ -458,6 +496,7 @@ process discard_unfixables {
    output:
    tuple val(sample_id), file("*_1.cor.fq"), file("*_2.cor.fq") into CORRECTED_PAIRS_CLEAN
 
+   script:
    """
    echo "Removing unfixable reads from corrected files: $forward_reads $reverse_reads"
 
@@ -473,8 +512,10 @@ process remove_rRNA {
   tuple val(sample_id), file(forward_reads), file(reverse_reads) from CORRECTED_PAIRS_CLEAN
 
   output:
-  tuple val(sample_id), file("*whitelist_paired_unaligned_1.fq"), file("*whitelist_paired_unaligned_2.fq") into rRNA_DEPLETED_READS
+  file("*whitelist_paired_unaligned_1.fq") into FORWARD_READS_FOR_ASSEMBLY
+  file("*whitelist_paired_unaligned_2.fq") into REVERSE_READS_FOR_ASSEMBLY
 
+  script:
   """
   mkdir logs
 
@@ -485,11 +526,110 @@ process remove_rRNA {
     -1 "$forward_reads" \
     -2 "$reverse_reads" \
     --met-file logs/$sample_id"_bowtie2_metrics.txt" \
-    --al-conc-gz $sample_id"_blacklist_paired_aligned_%.fq" \
-    --un-conc-gz $sample_id"_whitelist_paired_unaligned_%.fq" \
-    --al-gz $sample_id"_blacklist_unpaired_aligned_%.fq" \
-    --un-gz $sample_id"_whitelist_unpaired_unaligned_%.fq"
+    --al-conc $sample_id"_blacklist_paired_aligned_%.fq" \
+    --un-conc $sample_id"_whitelist_paired_unaligned_%.fq" \
+    --al $sample_id"_blacklist_unpaired_aligned_%.fq" \
+    --un $sample_id"_whitelist_unpaired_unaligned_%.fq"
   """
+}
+
+// ### Multi-Assembly ###
+/*
+ * Combining the reads into singular files
+ */
+FORWARD_READS_FOR_ASSEMBLY
+  .mix( PREPROCESSED_FORWARD_READS )
+  .collectFile(name: "combined_forward_reads.fq", newLine: false, skip: 0)
+  .set { COMBINED_FORWARD_READS_FOR_ASSEMBLY }
+
+REVERSE_READS_FOR_ASSEMBLY
+  .mix( PREPROCESSED_REVERSE_READS )
+  .collectFile(name: "combined_reverse_reads.fq", newLine: false, skip: 0)
+  .set  { COMBINED_REVERSE_READS_FOR_ASSEMBLY }
+
+/*
+ * Splitting the reads channels for each assembler
+ */
+COMBINED_FORWARD_READS_FOR_ASSEMBLY.into { FORWARD_READS_FOR_TRINITY }
+COMBINED_REVERSE_READS_FOR_ASSEMBLY.into { REVERSE_READS_FOR_TRINITY }
+
+/*
+ * Assembly with Trinity
+ */
+process assembly_Trinity {
+
+when: 
+params.use_trinity == true
+
+input:
+file(forward_reads) from FORWARD_READS_FOR_TRINITY
+file(reverse_reads) from REVERSE_READS_FOR_TRINITY
+
+output:
+file("Trinity.fasta") into TRANSCRIPTOME_ASSEMBLIES
+
+script:
+"""
+Trinity \
+  --seqType fq \
+  --CPU ${params.max_cpus} \
+  --max_memory ${params.trinity_mem} \
+  --min_kmer_cov 3 \
+  --left "$forward_reads" \
+  --right "$reverse_reads"
+"""
+}
+
+/*
+ * Combining multiple assemblies into a single sequence file
+ */
+TRANSCRIPTOME_ASSEMBLIES
+  .mix ( INPUT_ASSEMBLIES )
+  .collectFile(name: "combined_assemblies.fastq", newLine: false, skip: 0)
+  .set { COMBINED_ASSEMBLY }
+
+/*
+ * Unify assembly ID formats across the combined assemblies
+ */
+process unify_assembly_ids {
+when: 
+params.meta_assembly == true
+
+input:
+file(combined_assembly) from COMBINED_ASSEMBLY
+
+output:
+file("unified_transcriptome.fasta") into UNIFIED_COMBINED_ASSEMBLY
+
+script:
+"""
+trformat.pl \
+  -output unified_transcriptome.fasta \
+  -input $combined_assembly
+"""
+}
+
+/*
+ * Use Evidentialgene to identify the best transcript assemblies
+ */
+process evigene {
+when: 
+params.meta_assembly == true
+
+input:
+file(unified_assembly) from UNIFIED_COMBINED_ASSEMBLY
+
+output:
+file("okayset/unified_transcriptome.okay.mrna") into EVIGENE_OKAY_SET
+
+script:
+"""
+tr2aacds4.pl \
+  -logfile \
+  -cdnaseq $unified_assembly \
+  -NCPU ${params.max_cpus} \
+  -MAXMEM ${params.max_memory}
+"""
 }
 
 // ######  NF-CORE CODE ######

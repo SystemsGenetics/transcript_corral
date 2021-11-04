@@ -98,3 +98,5 @@ COPY --from=ezlabgva/busco:v5.2.2_cv1 / /
 # Adding the Trinity Docker image 
 COPY --from=trinityrnaseq/trinityrnaseq:2.13.2 / /
 
+# Adding the TransAbyss Docker image
+COPY --from=ss93/transabyss-2.0.1

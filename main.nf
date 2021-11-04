@@ -613,7 +613,7 @@ trformat.pl \
  * Use Evidentialgene to identify the best transcript assemblies
  */
 process evigene {
-when: 
+  when: 
 params.meta_assembly == true
 
 input:
